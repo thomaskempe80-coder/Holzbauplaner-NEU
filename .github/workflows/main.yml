@@ -1,0 +1,184 @@
+name: Build Holzbauplaner v0.025 Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Repository laden
+        uses: actions/checkout@v4
+
+      - name: Quellpaket entpacken
+        shell: powershell
+        run: |
+          Expand-Archive `
+            -Path Holzbauplaner_NEU_v0.025_SOURCE.zip `
+            -DestinationPath source `
+            -Force
+
+      - name: Windows Build-Umgebung mit OCCT einrichten
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-opencascade
+
+      - name: Holzbauplaner bauen
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/source/hbp025"
+
+          cmake \
+            -S "$ROOT" \
+            -B "$ROOT/build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+          cmake --build "$ROOT/build" -j2
+
+          test -f "$ROOT/build/bin/Holzbauplaner.exe"
+
+      - name: Windows-Paket zusammenstellen
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/source/hbp025"
+          OUT="$GITHUB_WORKSPACE/package/Holzbauplaner_NEU_v0.025"
+
+          mkdir -p "$OUT/dist"
+
+          cp \
+            "$ROOT/build/bin/Holzbauplaner.exe" \
+            "$OUT/dist/"
+
+          # Alle direkt benoetigten DLLs einsammeln
+          ldd "$ROOT/build/bin/Holzbauplaner.exe" \
+            | awk '/\/ucrt64\// {print $3}' \
+            | while read -r dll; do
+                if [ -f "$dll" ]; then
+                  cp -n "$dll" "$OUT/dist/"
+                fi
+              done
+
+          # OCCT-Toolkits sicherheitshalber komplett mitnehmen
+          cp -n /ucrt64/bin/TK*.dll "$OUT/dist/" || true
+
+          # Typische Runtime-Abhaengigkeiten
+          for dll in \
+            libgcc_s_seh-1.dll \
+            libstdc++-6.dll \
+            libwinpthread-1.dll \
+            libfreetype-6.dll \
+            libpng16-16.dll \
+            zlib1.dll \
+            libbz2-1.dll \
+            libbrotlidec.dll \
+            libbrotlicommon.dll \
+            libharfbuzz-0.dll \
+            libgraphite2.dll \
+            libglib-2.0-0.dll \
+            libintl-8.dll \
+            libiconv-2.dll \
+            libpcre2-8-0.dll \
+            libzstd.dll \
+            liblzma-5.dll \
+            libexpat-1.dll \
+            libtbb12.dll \
+            libtbbmalloc.dll
+          do
+            if [ -f "/ucrt64/bin/$dll" ]; then
+              cp -n "/ucrt64/bin/$dll" "$OUT/dist/"
+            fi
+          done
+
+          # OCCT-Ressourcen
+          mkdir -p "$OUT/occt-data"
+
+          if [ -d /ucrt64/share/opencascade/resources ]; then
+            cp -r \
+              /ucrt64/share/opencascade/resources/* \
+              "$OUT/occt-data/" || true
+          fi
+
+          cp "$ROOT/README.txt" "$OUT/README.txt"
+
+          cat > "$OUT/INSTALL_Holzbauplaner.bat" <<'BAT'
+          @echo off
+          setlocal
+
+          set "VERSION=0.025"
+          set "SOURCE=%~dp0dist"
+          set "TARGET=%LOCALAPPDATA%\Holzbauplaner\versions\v%VERSION%"
+
+          if not exist "%SOURCE%\Holzbauplaner.exe" (
+              echo FEHLER: Holzbauplaner.exe fehlt.
+              pause
+              exit /b 2
+          )
+
+          if not exist "%TARGET%" mkdir "%TARGET%"
+
+          xcopy "%SOURCE%\*" "%TARGET%\" /E /I /Y >nul
+
+          if exist "%~dp0occt-data" (
+              xcopy "%~dp0occt-data\*" "%TARGET%\occt-data\" /E /I /Y >nul
+          )
+
+          (
+              echo @echo off
+              echo set "CSF_ShadersDirectory=%%~dp0occt-data\Shaders"
+              echo set "CSF_MDTVTexturesDirectory=%%~dp0occt-data\Textures"
+              echo start "" "%%~dp0Holzbauplaner.exe"
+          ) > "%TARGET%\START_Holzbauplaner.bat"
+
+          echo.
+          echo Installation erfolgreich.
+          echo Version: v%VERSION%
+          echo.
+
+          call "%TARGET%\START_Holzbauplaner.bat"
+
+          endlocal
+          BAT
+
+          cat > "$OUT/START_Holzbauplaner.bat" <<'BAT'
+          @echo off
+
+          set "APP=%LOCALAPPDATA%\Holzbauplaner\versions\v0.025\START_Holzbauplaner.bat"
+
+          if not exist "%APP%" (
+              echo Holzbauplaner v0.025 ist noch nicht installiert.
+              echo Bitte zuerst INSTALL_Holzbauplaner.bat starten.
+              pause
+              exit /b 2
+          )
+
+          call "%APP%"
+          BAT
+
+      - name: Fertige ZIP erzeugen
+        shell: powershell
+        run: |
+          Compress-Archive `
+            -Path package\Holzbauplaner_NEU_v0.025 `
+            -DestinationPath Holzbauplaner_NEU_v0.025_WINDOWS.zip `
+            -Force
+
+      - name: Fertige Windows-Version bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: Holzbauplaner_NEU_v0.025_WINDOWS
+          path: Holzbauplaner_NEU_v0.025_WINDOWS.zip
+          retention-days: 7
